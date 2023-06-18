@@ -11,6 +11,10 @@ const { runBacalhau } = require('./bacalhau/run.js');
 const { findJob } = require('./bacalhau/findJob');
 const { changeEvent } = require('./tableland/change_event.js');
 
+const Queue = require('bull');
+const myQueue = new Queue('myQueue');
+
+
 app.use(cors());  // Enable CORS
 
 app.get('/bacalhau-run', (req, res) => {
@@ -52,57 +56,68 @@ app.get('/bacalhau-run', (req, res) => {
     });
 });
 
-app.get('/startJob', async (req, res) => {
-    //TODO: background running job.... 
-    let provider = new ethers.JsonRpcProvider(process.env.URL)
 
+app.get('/')
+
+
+myQueue.process(async (job) => {
+    // job processing logic here
+    const values = job.data.args;
+    
+    console.log(values);
+    const result = await runBacalhau(`bacalhau docker run ${values.spec_start} ${values.spec_end}`);
+    console.log(result.message);
+    const jobId = findJob(result.message);
+    const eventResult = await changeEvent(values.id, jobId);
+    console.log(eventResult)
+    // store eventResult or do something else...
+});
+
+app.get('/startJob', async (req, res) => {
+    let provider = new ethers.JsonRpcProvider(process.env.URL)
     let contract = new Contract(process.env.JOBS_CONTRACT, JobsAbi, provider)
 
     const eventListener = async (blockNumber) => {
-        // This line of code listens to the block mining and every time a block is mined, it will return blocknumber.
         const transferEvent = await contract.queryFilter(
-            //Simply used the queryfilter to listen to the transfer event everytime a block is mined.
             "newJobRequest",
             blockNumber - 1,
             blockNumber
         );
-        console.log(transferEvent);
 
         if (transferEvent.length > 0) {
-            // If a "newJobRequest" event has been emitted in the last block, resolve the promise and remove the listener.
             provider.off('block', eventListener);
-            // Call your function here when an event has been emitted
-
             const values = transferEvent[0]
+            
+            myQueue.add({id: values.args[0].toString(),  spec_start: values.args[1], spec_end: values.args[2] });
+            
 
-            console.log(values.args[1])
-            console.log(values.args[2])
-
-            const result = await runBacalhau(`bacalhau docker run ${values.args[1]} ${values.args[2]}`);
-            console.log(result.message);
-            const jobId = findJob(result.message);
-
-            await changeEvent(values.args[0], jobId);
-            return res.json(jobId);
-
-
+            // Notify client that the job is added
+            if (!res.headersSent) {
+                res.json({ success: true, message: "Job added to the queue" });
+            }
         }
     };
 
     provider.on('block', eventListener);
 
+    // Set a timeout to make sure the response is sent in case no event is triggered
+    setTimeout(() => {
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'No event was triggered within the time limit' });
+        }
+    }, 10000); // 10 seconds, adjust as needed
 })
-//person put int he contract. 
+
+
+
+
 
 
 app.get('/bacalhau', async (req, res) => {
-    //user can input his job-id and the computation. 
-    //testing to see if the bacalhau job is running and returning a jobId. 
-    
     const result = await runBacalhau(`bacalhau docker run ubuntu echo Hello World`);
     const jobId = findJob(result.message);
     return res.json(jobId);
-})
+});
 
 
 app.get('/describe-script', (req, res) => {
